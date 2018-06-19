@@ -16,17 +16,18 @@ class RNNModel(nn.Module):
                  tie_weights=False, ldropout=0.5, n_experts=10):
         super(RNNModel, self).__init__()
         self.lockdrop = LockedDropout()
-        self.encoder = nn.Embedding(ntoken, ninp)
-        
+        self.encoder = nn.Embedding(ntoken*n_experts, ninp)
+
         self.rnns = [torch.nn.LSTM(ninp if l == 0 else nhid, nhid if l != nlayers - 1 else nhidlast, 1, dropout=0) for l in range(nlayers)]
         if wdrop:
             self.rnns = [WeightDrop(rnn, ['weight_hh_l0'], dropout=wdrop) for rnn in self.rnns]
         self.rnns = torch.nn.ModuleList(self.rnns)
 
-        self.prior = nn.Linear(nhidlast, n_experts, bias=False)
-        self.latent = nn.Sequential(nn.Linear(nhidlast, n_experts*ninp), nn.Tanh())
-        self.decoder = nn.Linear(ninp, ntoken)
-
+        self.prior = nn.Linear(nhidlast, 1, bias=False)
+        #self.latent = nn.Sequential(nn.Linear(nhidlast, ninp), nn.Tanh())
+        self.decoder = nn.Linear(ninp, ntoken*n_experts)
+        #self.proj_expert = nn.Linear(ntoken*n_experts, ntoken)
+        #print(ninp, ntoken)
         # Optionally tie weights as in:
         # "Using the Output Embedding to Improve Language Models" (Press & Wolf 2016)
         # https://arxiv.org/abs/1608.05859
@@ -66,13 +67,18 @@ class RNNModel(nn.Module):
         self.decoder.weight.data.uniform_(-initrange, initrange)
 
     def forward(self, input, hidden, return_h=False, return_prob=False):
-        batch_size = input.size(1)
-
-        emb = embedded_dropout(self.encoder, input, dropout=self.dropoute if self.training else 0)
-        #emb = self.idrop(emb)
-
+        length, batch_size = input.size()
+        #print(input)
+        input = input * self.n_experts
+        # (length, batch_size * n_experts)
+        input_experts = torch.cat([input+i for i in range(self.n_experts)], dim=1)
+        # (length, batch_size * n_experts, emb_dim)
+        #print(input_experts)
+        emb = embedded_dropout(self.encoder, input_experts, dropout=self.dropoute if self.training else 0)
+        # (length, batch_size * n_experts, emb_dim)
         emb = self.lockdrop(emb, self.dropouti)
-
+        #print(emb)
+        #exit(0)
         raw_output = emb
         new_hidden = []
         #raw_output, hidden = self.rnn(emb, hidden)
@@ -89,19 +95,29 @@ class RNNModel(nn.Module):
                 outputs.append(raw_output)
         hidden = new_hidden
 
-        output = self.lockdrop(raw_output, self.dropout)
+        output = self.lockdrop(raw_output, self.dropout) # (length, batch_size*n_expert, dim_last)
         outputs.append(output)
 
-        latent = self.latent(output)
-        latent = self.lockdrop(latent, self.dropoutl)
-        logit = self.decoder(latent.view(-1, self.ninp))
+        #print(output)
+        #latent = self.latent(output) # (length, batch_size*n_expert, ninp)
+        #latent = self.lockdrop(latent, self.dropoutl)
+        #print(latent)
+        #logit = self.decoder(latent.view(-1, self.ninp)) # (length*batch_size*n_expert, ntok*n_expert)
+        logit = self.decoder(output.view(-1, self.ninp)) # (length*batch_size*n_expert, ntok*n_expert)
+        #logit = self.proj_expert(logit) # (length*batch_size*n_expert, ntok)
+        #print(logit)
+        #exit(0)
 
-        prior_logit = self.prior(output).contiguous().view(-1, self.n_experts)
-        prior = nn.functional.softmax(prior_logit)
-
-        prob = nn.functional.softmax(logit.view(-1, self.ntoken)).view(-1, self.n_experts, self.ntoken)
+        prior_logit = self.prior(output) # (length, batch_size*n_expert, 1) 
+        prior_logit = prior_logit.view(length, self.n_experts, batch_size).permute(0, 2, 1).contiguous()
+        prior_logit = prior_logit.view(-1, self.n_experts)
+        prior = nn.functional.softmax(prior_logit, dim=-1)
+        #print(prior)
+        prob = nn.functional.softmax(logit.view(-1, self.ntoken)).view(-1, self.n_experts, batch_size, self.ntoken*self.n_experts)
+        prob = prob.permute(0, 2, 1, 3).contiguous().view(-1, self.n_experts, self.ntoken*self.n_experts) 
+        prob = (prob * prior.unsqueeze(2).expand_as(prob)).sum(1) # (length*batch_size, ntoken*n_experts)
+        prob = prob.view(-1, self.n_experts, self.ntoken) 
         prob = (prob * prior.unsqueeze(2).expand_as(prob)).sum(1)
-
         if return_prob:
             model_output = prob
         else:
@@ -116,8 +132,8 @@ class RNNModel(nn.Module):
 
     def init_hidden(self, bsz):
         weight = next(self.parameters()).data
-        return [(Variable(weight.new(1, bsz, self.nhid if l != self.nlayers - 1 else self.nhidlast).zero_()),
-                 Variable(weight.new(1, bsz, self.nhid if l != self.nlayers - 1 else self.nhidlast).zero_()))
+        return [(Variable(weight.new(1, bsz*self.n_experts, self.nhid if l != self.nlayers - 1 else self.nhidlast).zero_()),
+                 Variable(weight.new(1, bsz*self.n_experts, self.nhid if l != self.nlayers - 1 else self.nhidlast).zero_()))
                 for l in range(self.nlayers)]
 
 if __name__ == '__main__':
