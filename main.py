@@ -80,6 +80,8 @@ parser.add_argument('--max_seq_len_delta', type=int, default=40,
                     help='max sequence length')
 parser.add_argument('--single_gpu', default=False, action='store_true', 
                     help='use single GPU')
+parser.add_argument('--softmax_expert', default=False, action='store_true') 
+parser.add_argument('--emb_hid_prior', default=False, action='store_true') 
 args = parser.parse_args()
 
 if args.nhidlast < 0:
@@ -131,7 +133,7 @@ if args.continue_train:
 else:
     model = model.RNNModel(args.model, ntokens, args.emsize, args.nhid, args.nhidlast, args.nlayers, 
                        args.dropout, args.dropouth, args.dropouti, args.dropoute, args.wdrop, 
-                       args.tied, args.dropoutl, args.n_experts)
+                       args.tied, args.dropoutl, args.n_experts, args.softmax_expert, args.emb_hid_prior)
 
 if args.cuda:
     if args.single_gpu:

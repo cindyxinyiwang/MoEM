@@ -13,7 +13,7 @@ class RNNModel(nn.Module):
 
     def __init__(self, rnn_type, ntoken, ninp, nhid, nhidlast, nlayers, 
                  dropout=0.5, dropouth=0.5, dropouti=0.5, dropoute=0.1, wdrop=0, 
-                 tie_weights=False, ldropout=0.5, n_experts=10):
+                 tie_weights=False, ldropout=0.5, n_experts=10, softmax_expert=False, emb_hid_prior=False):
         super(RNNModel, self).__init__()
         self.lockdrop = LockedDropout()
         self.encoder = nn.Embedding(ntoken*n_experts, ninp)
@@ -22,8 +22,11 @@ class RNNModel(nn.Module):
         if wdrop:
             self.rnns = [WeightDrop(rnn, ['weight_hh_l0'], dropout=wdrop) for rnn in self.rnns]
         self.rnns = torch.nn.ModuleList(self.rnns)
-
-        self.prior = nn.Linear(nhidlast, 1, bias=False)
+        self.emb_hid_prior = emb_hid_prior
+        if self.emb_hid_prior:
+          self.prior = nn.Linear(nhidlast+ninp, 1, bias=False)
+        else:
+          self.prior = nn.Linear(nhidlast, 1, bias=False)
         #self.latent = nn.Sequential(nn.Linear(nhidlast, ninp), nn.Tanh())
         self.decoder = nn.Linear(ninp, ntoken*n_experts)
         #self.proj_expert = nn.Linear(ntoken*n_experts, ntoken)
@@ -41,6 +44,7 @@ class RNNModel(nn.Module):
 
         self.init_weights()
 
+        self.softmax_expert = softmax_expert
         self.rnn_type = rnn_type
         self.ninp = ninp
         self.nhid = nhid
@@ -98,26 +102,28 @@ class RNNModel(nn.Module):
         output = self.lockdrop(raw_output, self.dropout) # (length, batch_size*n_expert, dim_last)
         outputs.append(output)
 
-        #print(output)
-        #latent = self.latent(output) # (length, batch_size*n_expert, ninp)
-        #latent = self.lockdrop(latent, self.dropoutl)
-        #print(latent)
-        #logit = self.decoder(latent.view(-1, self.ninp)) # (length*batch_size*n_expert, ntok*n_expert)
         logit = self.decoder(output.view(-1, self.ninp)) # (length*batch_size*n_expert, ntok*n_expert)
-        #logit = self.proj_expert(logit) # (length*batch_size*n_expert, ntok)
-        #print(logit)
-        #exit(0)
 
-        prior_logit = self.prior(output) # (length, batch_size*n_expert, 1) 
+        if self.emb_hid_prior:
+          prior_logit = self.prior(torch.cat([output, emb], dim=2)) # (length, batch_size*n_expert, 1) 
+        else:
+          prior_logit = self.prior(output) # (length, batch_size*n_expert, 1) 
         prior_logit = prior_logit.view(length, self.n_experts, batch_size).permute(0, 2, 1).contiguous()
         prior_logit = prior_logit.view(-1, self.n_experts)
         prior = nn.functional.softmax(prior_logit, dim=-1)
-        #print(prior)
-        prob = nn.functional.softmax(logit.view(-1, self.ntoken)).view(-1, self.n_experts, batch_size, self.ntoken*self.n_experts)
-        prob = prob.permute(0, 2, 1, 3).contiguous().view(-1, self.n_experts, self.ntoken*self.n_experts) 
-        prob = (prob * prior.unsqueeze(2).expand_as(prob)).sum(1) # (length*batch_size, ntoken*n_experts)
-        prob = prob.view(-1, self.n_experts, self.ntoken) 
-        prob = (prob * prior.unsqueeze(2).expand_as(prob)).sum(1)
+
+        if self.softmax_expert:
+          prob = nn.functional.softmax(logit).view(-1, self.n_experts, batch_size, self.ntoken*self.n_experts)
+          prob = prob.permute(0, 2, 1, 3).contiguous().view(-1, self.n_experts, self.ntoken*self.n_experts) 
+          prob = (prob * prior.unsqueeze(2).expand_as(prob)).sum(1) # (length*batch_size, ntoken*n_experts)
+          prob = prob.view(-1, self.n_experts, self.ntoken) 
+          prob = prob.sum(1)
+        else:
+          prob = nn.functional.softmax(logit.view(-1, self.ntoken)).view(-1, self.n_experts, batch_size, self.ntoken*self.n_experts)
+          prob = prob.permute(0, 2, 1, 3).contiguous().view(-1, self.n_experts, self.ntoken*self.n_experts) 
+          prob = (prob * prior.unsqueeze(2).expand_as(prob)).sum(1) # (length*batch_size, ntoken*n_experts)
+          prob = prob.view(-1, self.n_experts, self.ntoken) 
+          prob = (prob * prior.unsqueeze(2).expand_as(prob)).sum(1)
         if return_prob:
             model_output = prob
         else:
