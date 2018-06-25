@@ -12,6 +12,7 @@ import gc
 
 import data
 import model
+import model_v2
 
 from utils import batchify, get_batch, repackage_hidden, create_exp_dir, save_checkpoint
 
@@ -82,6 +83,9 @@ parser.add_argument('--single_gpu', default=False, action='store_true',
                     help='use single GPU')
 parser.add_argument('--softmax_expert', default=False, action='store_true') 
 parser.add_argument('--emb_hid_prior', default=False, action='store_true') 
+parser.add_argument('--version', type=int, default=0,
+                    help='number of experts')
+
 args = parser.parse_args()
 
 if args.nhidlast < 0:
@@ -131,9 +135,17 @@ ntokens = len(corpus.dictionary)
 if args.continue_train:
     model = torch.load(os.path.join(args.save, 'model.pt'))
 else:
-    model = model.RNNModel(args.model, ntokens, args.emsize, args.nhid, args.nhidlast, args.nlayers, 
-                       args.dropout, args.dropouth, args.dropouti, args.dropoute, args.wdrop, 
-                       args.tied, args.dropoutl, args.n_experts, args.softmax_expert, args.emb_hid_prior)
+    if args.version == 0:
+      model = model.RNNModel(args.model, ntokens, args.emsize, args.nhid, args.nhidlast, args.nlayers, 
+                         args.dropout, args.dropouth, args.dropouti, args.dropoute, args.wdrop, 
+                         args.tied, args.dropoutl, args.n_experts, args.softmax_expert, args.emb_hid_prior)
+    elif args.version == 2:
+      model = model_v2.RNNModel_v2(args.model, ntokens, args.emsize, args.nhid, args.nhidlast, args.nlayers, 
+                         args.dropout, args.dropouth, args.dropouti, args.dropoute, args.wdrop, 
+                         args.tied, args.dropoutl, args.n_experts)
+    else:
+      print("version {} not implemented".format(args.version))
+      exit(1)
 
 if args.cuda:
     if args.single_gpu:
